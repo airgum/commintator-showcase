@@ -4,6 +4,7 @@
 
 Multi-tenant SaaS that runs end-to-end AI editorial pipelines.
 Built solo since February 2026. Live production, alpha.
+Scope: ~93K production LOC, ~130K test LOC, single maintainer.
 
 This repository is a public case study. **Source code is private.**
 What follows is the architecture, the engineering choices that
@@ -30,7 +31,7 @@ progress to the frontend in real time.
 | Layer       | Choice                                            |
 |-------------|---------------------------------------------------|
 | Backend     | FastAPI (Python 3.11), async SQLAlchemy + asyncpg |
-| Frontend    | Next.js 15 (App Router), React 18, TypeScript     |
+| Frontend    | Next.js 15 (App Router), React 19, TypeScript     |
 | Vector DB   | ChromaDB 1.5.1 (multilingual-e5-large embedder)   |
 | Relational  | PostgreSQL                                        |
 | Cache       | Redis                                             |
@@ -45,7 +46,7 @@ progress to the frontend in real time.
 
 #### 1. Architecture LAW (CI-enforced)
 
-Four invariants live as architecture tests in
+Eight invariants live as architecture tests in
 `backend/tests/architecture/`. CI fails the build on violation.
 This is mechanical enforcement, not developer discipline.
 
@@ -63,6 +64,23 @@ This is mechanical enforcement, not developer discipline.
    a single canonical deletion path, a scheduled reconciler that
    reports drift, and per-row savepoint isolation in batch
    operations.
+5. **`setInterval` frontend floor.** Numeric `setInterval` calls
+   in `frontend/src/` must be >= 15000ms. Sub-15s requires an
+   inline marker with a reason. Protects against accidental
+   polling storms that translate into LLM cost.
+6. **i18n locale parity.** `en.json`, `ru.json`, `es.json` must
+   carry identical nested key sets. Adding or removing a key in
+   one locale without updating all three fails CI.
+7. **No vendor names in planning docs.** Prose in `.planning/`
+   must not name specific providers or models. Architecture is
+   expressed in provider-agnostic tiers (LITE, complex,
+   user's key). The user owns vendor choice per project; the
+   router enforces the routing matrix, not vendor identity.
+8. **Soft-warning baseline.** `ruff`, `mypy`, `pip-audit`, and
+   `npm audit` run as HARD CI gates via baseline diff. Any new
+   warning absent from the frozen baseline fails CI. Baseline
+   regeneration requires an explicit double-gate (CLI flag plus
+   env var) to prevent accidental drift.
 
 Each rule has a CI test. Each change to the LAW requires a
 CHANGELOG entry with date, action, and incident reference.
@@ -76,16 +94,20 @@ is a regression, not a fix. Quality at the cost of price is debt,
 not a fix.
 
 In practice:
-- Groq free tier for `lang_detect`, `relevance`, `dedup`,
-  `source_filter`. Never on Gemini.
-- Gemini for `generation`, `style_analysis`, `chatbot`,
-  `translation`. `thinking_budget=0` for tasks in
-  `NO_THINKING_TASKS`.
+- LITE-tier tasks (`lang_detect`, `relevance`, `dedup`,
+  `source_filter`) route to the user's free-tier provider key.
+  Never to the complex-tier provider.
+- Complex-tier tasks (`generation`, `style_analysis`, `chatbot`,
+  `translation`) route to the user's complex-tier provider key.
+  `thinking_budget=0` for tasks listed in `NO_THINKING_TASKS`.
+- Provider choice per project is owned by the user. The router
+  enforces the routing matrix; vendor identity is configuration,
+  not architecture.
 - Per-user spend cap: $0.10/day hard, $0.05/day soft. Enforced
   in `token_tracker`. Returns `429 user_daily_cap` on breach.
 - Every LLM loop has a batch limit, a per-project `asyncio.Lock`,
   and an inter-call sleep.
-- Frontend `setInterval` minimum is 15s.
+- Frontend `setInterval` minimum is 15s (LAW §5).
 
 #### 3. Tenant context
 
@@ -115,10 +137,11 @@ at rest. Master key is derived from `SECRET_KEY`. Legacy XOR
 blobs are read via a fallback path during in-place migration.
 Future: external KMS, plaintext never resident in the process.
 
-**Pipeline concurrency.** Gemini calls run under `Semaphore(3)`
-(raised from 1 once observability showed safe headroom). DB pool
-20 + 40 overflow. Per-project `asyncio.Lock` on runaway-prone
-agents. Cancellation propagates through the agent chain.
+**Pipeline concurrency.** Complex-tier LLM calls run under
+`Semaphore(3)` (raised from 1 once observability showed safe
+headroom). DB pool 20 + 40 overflow. Per-project `asyncio.Lock`
+on runaway-prone agents. Cancellation propagates through the
+agent chain.
 
 **Authentication.** JWT in HttpOnly cookie via a same-origin
 Next.js proxy. SSE auth uses a short-lived HMAC ticket
@@ -141,13 +164,19 @@ server with a dedicated compose override.
 
 **Deploy gates.** `deploy.sh` refuses to ship if:
 - CI is not green on the exact commit SHA, or
-- staging has not passed within the last 24h for this commit.
+- staging has not passed within the last 24h for this commit, or
+- the post-deploy e2e suite is not green for this commit.
+
+A run still in progress on any of the three is distinguished from
+a failed run, so the operator gets «retry in 2-3 min» instead of
+a generic «missing» that would push them to override.
 
 `FORCE_DEPLOY=1` requires `FORCE_DEPLOY_REASON='...'` and emits
-a Telegram audit alert with diff stats, commit log since last
-staging-verified SHA, and secret redaction (Fernet tokens,
-`SECRET_KEY`, `BOT_TOKEN`, `API_KEY`, `PASSWORD`,
-`POSTGRES_PASSWORD` are replaced inline before send).
+a Telegram audit alert listing every gate bypassed (CI, staging,
+e2e), diff stats, commit log since last staging-verified SHA, and
+secret redaction (Fernet tokens, `SECRET_KEY`, `BOT_TOKEN`,
+`API_KEY`, `PASSWORD`, `POSTGRES_PASSWORD` are replaced inline
+before send).
 
 Caddy reload is in-place: existing connections drain on the old
 config, new ones land on the new one. Pre-build disk check
@@ -161,16 +190,18 @@ long job (peak estimate, headroom budget >=10GB, structural,
 not "I'll remember").
 
 100% line coverage gate (`--cov-fail-under=100`) on the coverage
-branch, 4273 tests, 0 failures. Architecture tests run against
-the source tree. Integration tests run against a real Postgres
-container. Frontend type-check is mandatory. Dependabot runs
-weekly on 40-char SHA-pinned actions.
+branch, ~5700 tests across 22 architecture tests plus full
+behavioral suite. Architecture tests run against the source tree.
+Integration tests run against a real Postgres container. Frontend
+type-check is mandatory. Dependabot runs weekly on 40-char
+SHA-pinned actions.
 
 ### Roadmap (M2)
 
 Migration to `pgvector` consolidates the vector store into
 Postgres and removes the dual-write surface entirely. 29 phases
-across 5 waves. Roadmap is the single source of truth.
+across 5 waves; Wave 1 (foundation hardening) in progress.
+Roadmap is the single source of truth.
 
 ### License
 
