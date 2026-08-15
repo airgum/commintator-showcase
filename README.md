@@ -4,7 +4,7 @@
 
 Multi-tenant SaaS that runs end-to-end AI editorial pipelines.
 Built solo since February 2026. Live production, alpha.
-Scope: ~93K production LOC, ~130K test LOC, single maintainer.
+Scope: ~162K production LOC, ~313K test LOC, single maintainer.
 
 This repository is a public case study. **Source code is private.**
 What follows is the architecture, the engineering choices that
@@ -46,9 +46,10 @@ progress to the frontend in real time.
 
 #### 1. Architecture LAW (CI-enforced)
 
-Eight invariants live as architecture tests in
+23 invariants live as architecture tests in
 `backend/tests/architecture/`. CI fails the build on violation.
-This is mechanical enforcement, not developer discipline.
+This is mechanical enforcement, not developer discipline. A
+representative sample:
 
 1. **Multi-tenant isolation.** `project_id` is required (not
    `Optional`) in every agent signature. Nullable typing in agent
@@ -73,7 +74,7 @@ This is mechanical enforcement, not developer discipline.
    one locale without updating all three fails CI.
 7. **No vendor names in planning docs.** Prose in `.planning/`
    must not name specific providers or models. Architecture is
-   expressed in provider-agnostic tiers (LITE, complex,
+   expressed in provider-agnostic tiers (cheap, complex,
    user's key). The user owns vendor choice per project; the
    router enforces the routing matrix, not vendor identity.
 8. **Soft-warning baseline.** `ruff`, `mypy`, `pip-audit`, and
@@ -81,6 +82,19 @@ This is mechanical enforcement, not developer discipline.
    warning absent from the frozen baseline fails CI. Baseline
    regeneration requires an explicit double-gate (CLI flag plus
    env var) to prevent accidental drift.
+9. **Thinking-budget coverage.** Every task routed to a free-tier
+   provider lane must also appear in the no-thinking-budget set —
+   a structured or template-bound answer gets nothing from
+   reasoning tokens, so the pairing is enforced, not assumed.
+10. **Response-model shape fidelity.** Cross-layer API response
+    shapes are named, typed models — a bare `dict` / `list` /
+    `Any` at a producer-to-schema-to-frontend seam fails CI. Closes
+    the exact bug class that once turned a list-vs-dict mismatch
+    into a 500 in production.
+11. **Cross-tenant session pin.** A background task or SSE stream
+    must explicitly pin its own tenant context on every request;
+    it can never inherit or leak another tenant's from a shared
+    event loop.
 
 Each rule has a CI test. Each change to the LAW requires a
 CHANGELOG entry with date, action, and incident reference.
@@ -94,17 +108,26 @@ is a regression, not a fix. Quality at the cost of price is debt,
 not a fix.
 
 In practice:
-- LITE-tier tasks (`lang_detect`, `relevance`, `dedup`,
-  `source_filter`) route to the user's free-tier provider key.
-  Never to the complex-tier provider.
-- Complex-tier tasks (`generation`, `style_analysis`, `chatbot`,
-  `translation`) route to the user's complex-tier provider key.
-  `thinking_budget=0` for tasks listed in `NO_THINKING_TASKS`.
+- Every task routes into one of four pools: `complex`
+  (generation, style analysis, translation, five self-review
+  sub-tasks), `relevance` (isolated from general cheap traffic so
+  a storm on one never starves the other), `judge` (same-story
+  dedup arbitration, its own bulkhead pool), or `simple`
+  (everything else — `lang_detect`, `dedup`, `source_filter`).
+  Each pool has its own key-exhaustion bucket.
+- Cheap-tier tasks route to a funded paid key, never a free-tier
+  provider — a free tier's rate-limit error text can't always be
+  trusted to mean what it says, which cost a false multi-hour key
+  quarantine once.
+- `thinking_budget=0` for tasks listed in `NO_THINKING_TASKS`
+  (structured or template-bound answers get nothing from
+  reasoning tokens) — this pairing is itself a LAW invariant.
 - Provider choice per project is owned by the user. The router
   enforces the routing matrix; vendor identity is configuration,
   not architecture.
-- Per-user spend cap: $0.10/day hard, $0.05/day soft. Enforced
-  in `token_tracker`. Returns `429 user_daily_cap` on breach.
+- Per-user and per-project daily spend caps, tiered by account
+  status. Enforced in `token_tracker`. A soft threshold logs; a
+  hard threshold returns `429`.
 - Every LLM loop has a batch limit, a per-project `asyncio.Lock`,
   and an inter-call sleep.
 - Frontend `setInterval` minimum is 15s (LAW §5).
@@ -139,7 +162,9 @@ Future: external KMS, plaintext never resident in the process.
 
 **Pipeline concurrency.** Complex-tier LLM calls run under
 `Semaphore(3)` (raised from 1 once observability showed safe
-headroom). DB pool 20 + 40 overflow. Per-project `asyncio.Lock`
+headroom). DB pool 20 + 20 overflow, 40 total under peak load
+(raised from 10+20 after a 2026-04 topic-extraction runaway burned
+30 slots in one bad feedback loop). Per-project `asyncio.Lock`
 on runaway-prone agents. Cancellation propagates through the
 agent chain.
 
@@ -159,7 +184,7 @@ which detector ran.
 **Backups.** `pg_dump` plus ChromaDB snapshot, GPG-encrypted,
 rclone to R2. Systemd timer 03:00 UTC daily. Separate verifier
 05:00 UTC with Telegram alert on silent failure. GFS retention
-7 daily + 4 weekly + 6 monthly. Restore-test runs on the staging
+5 daily + 3 weekly + 3 monthly. Restore-test runs on the staging
 server with a dedicated compose override.
 
 **Deploy gates.** `deploy.sh` refuses to ship if:
@@ -179,29 +204,35 @@ secret redaction (Fernet tokens, `SECRET_KEY`, `BOT_TOKEN`,
 before send).
 
 Caddy reload is in-place: existing connections drain on the old
-config, new ones land on the new one. Pre-build disk check
-prunes Docker cache when free space < 5GB.
+config, new ones land on the new one. Pre-build disk check prunes
+Docker cache when free space < 10GB; if pruning doesn't recover
+enough, a hard 5GB floor aborts the deploy for manual investigation
+instead of racing a build against a full disk.
 
 ### CI
 
-Self-hosted runners on a dedicated 50GB block volume, separate
-from production storage. Pre-flight disk inventory before every
-long job (peak estimate, headroom budget >=10GB, structural,
-not "I'll remember").
+Ubicloud ARM cloud runners handle lint/test/coverage; a dedicated
+self-hosted Oracle VM runner (its own 50GB block volume, separate
+from production storage) handles staging deploy and e2e. Pre-flight
+disk inventory before every long job on the self-hosted box (peak
+estimate, headroom budget >=10GB, structural, not "I'll remember").
 
 100% line coverage gate (`--cov-fail-under=100`) on the coverage
-branch, ~5700 tests across 22 architecture tests plus full
-behavioral suite. Architecture tests run against the source tree.
+branch, ~7,300 tests across 866 files, 60 of them dedicated
+architecture-invariant tests. Architecture tests run against the
+source tree.
 Integration tests run against a real Postgres container. Frontend
 type-check is mandatory. Dependabot runs weekly on 40-char
 SHA-pinned actions.
 
-### Roadmap (M2)
+### Roadmap
 
-Migration to `pgvector` consolidates the vector store into
-Postgres and removes the dual-write surface entirely. 29 phases
-across 5 waves; Wave 1 (foundation hardening) in progress.
-Roadmap is the single source of truth.
+Current focus: hardening the event/story data model that feeds
+generation and deduplication, and extending the per-project
+style-learning system with editorial-voice feedback loops. Each
+closed gap becomes a new CI-enforced invariant rather than a
+one-off fix — the architecture-LAW count above grew from 8 to 23
+this way.
 
 ### License
 
