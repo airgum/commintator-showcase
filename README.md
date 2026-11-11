@@ -2,6 +2,14 @@
 
 <p align="center"><img src="assets/logo.png" alt="Commintator" width="600"/></p>
 
+**Commintator: learn about events and react before your competitors do.** [commintator.com](https://commintator.com) · [try it without sign-up](https://commintator.com/try)
+
+Commintator is the best solution for anyone who needs speed-to-take and reactive PR. It monitors sources around the clock, selects events on finely tuned topics and immediately suggests how to respond. You learn about an event and speak up before your competitors. All that is left is to develop the idea, add your position and publish. It all happens in one window, as a dialogue: the system suggests ideas straight away, based on your professional goals and your audience's needs, which it knows in advance; then it works in your position, finds missing facts when needed and shapes everything into a complete publication that follows the way you reason. A finished publication can be scheduled or published at once. The system also creates images, videos and infographics that make the material easier to take in. The service is built so that one story takes just one to five minutes.
+
+Beyond the media, it is useful and works well for GR specialists and lobbyists, political consultants, lawyers and doctors, coaches and consultants, and the people who run PR and corporate newsletters. It also suits employee advocacy and competitor monitoring: competitors' publications can become a source you react to first.
+
+### Case study
+
 Multi-tenant SaaS that runs end-to-end AI editorial pipelines.
 Built solo since February 2026. Live in production.
 Scope: ~162K production LOC, ~313K test LOC, single maintainer.
