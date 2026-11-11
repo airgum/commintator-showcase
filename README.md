@@ -1,9 +1,9 @@
-## Comm:ntator (case study)
+## Commintator (case study)
 
-<p align="center"><img src="assets/logo.png" alt="Comm:ntator" width="600"/></p>
+<p align="center"><img src="assets/logo.png" alt="Commintator" width="600"/></p>
 
 Multi-tenant SaaS that runs end-to-end AI editorial pipelines.
-Built solo since February 2026. Live production, alpha.
+Built solo since February 2026. Live in production.
 Scope: ~162K production LOC, ~313K test LOC, single maintainer.
 
 This repository is a public case study. **Source code is private.**
@@ -243,3 +243,4 @@ released under [CC BY-NC 4.0](LICENSE).
 
 Goumar Zainoulline. Granada, Spain. goumar.zainoulline@gmail.com.
 LinkedIn: [linkedin.com/in/goumar](https://linkedin.com/in/goumar/).
+Product: [commintator.com](https://commintator.com). Try it without sign-up: [commintator.com/try](https://commintator.com/try).
